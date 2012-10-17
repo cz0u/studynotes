@@ -1,3 +1,5 @@
+// original: http://blog.youxu.info/2007/12/01/how-to-give-a-program-fake-system-time-so-that-you-can-use-it-forever-linux/
+//
 #include <stdio.h>
 #include <stdlib.h>
 #include <assert.h>
