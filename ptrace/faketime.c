@@ -9,6 +9,7 @@
 #include <sys/user.h>
 #include <sys/types.h>
 #include <sys/wait.h>
+#include <time.h>
 
 int main(int argc, char *argv[]) {
 	int pid;
@@ -31,8 +32,9 @@ int main(int argc, char *argv[]) {
 				break;
 			ptrace(PTRACE_GETREGS, pid, 0, &regs);
 			int orig_eax = regs.orig_eax;
-			//TODO: hook clock_gettime
-			if (orig_eax == SYS_time || orig_eax == SYS_clock_gettime) {
+			// hook clock_gettime
+			struct timespec *tp;
+			if (orig_eax == SYS_time) {
 				if (insyscall == 0)
 					insyscall = 1;
 				else {
@@ -40,6 +42,18 @@ int main(int argc, char *argv[]) {
 					regs.eax = 0x12345678;
 					ptrace(PTRACE_SETREGS, pid, 0, &regs);
 					insyscall = 0;
+				}
+			}
+			if (orig_eax == SYS_clock_gettime) {
+//				printf("clock_gettime\n");
+				if (insyscall == 0) {
+					insyscall = 1;
+					tp = regs.ecx; // second argument of clock_gettime
+				//	printf("%x\n", tp);
+				//	printf("%x\n", &tp->tv_sec);
+				} else {
+					insyscall = 0;
+					ptrace(PTRACE_POKEDATA, pid, &tp->tv_sec, 0x12345678);
 				}
 			}
 			ptrace(PTRACE_SYSCALL, pid, NULL, NULL);
