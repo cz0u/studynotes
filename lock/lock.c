@@ -12,6 +12,34 @@
 #include <sys/user.h>
 #include <sys/mman.h>
 
+#ifdef X86_64
+
+#define AX rax
+#define O_AX orig_rax
+#define BX rbx
+#define CX rcx
+#define DX rdx
+#define SI rsi
+#define DI rdi
+#define BP rbp
+#define SP rsp
+#define IP rip
+
+#else
+
+#define AX eax
+#define O_AX orig_eax
+#define BX ebx
+#define CX ecx
+#define DX edx
+#define SI esi
+#define DI edi
+#define BP ebp
+#define SP esp
+#define IP eip
+
+#endif
+
 //4 ptrace-stops: syscall-stop, signal-delivery-stop, group-stop, ptrace_event-stop;
 //group-stop: caused by receiving a stopping signal, that is , SIGSTOP, SIGTSTP, SIGTTIN, SIGTTOU; 
 //			  And a following ptrace(PTRACE_GETSIGINFO, pid, 0, &siginfo) will set errno to EINVAL;
@@ -176,8 +204,8 @@ int proc_read(struct proc *p, void *addr, char *buf, int len) {
 }
 
 void proc_push(struct proc *p, long data) {
-	p->regs.esp -= 4;	
-	proc_write(p, (void *)p->regs.esp, (char *)&data, sizeof(long));
+	p->regs.SP -= 4;	
+	proc_write(p, (void *)p->regs.SP, (char *)&data, sizeof(long));
 }
 
 //BX, CX, DX, SI, DI, BP
@@ -189,14 +217,14 @@ void *proc_mmap(struct proc *p, int prot, int flags) {
 	p->regs = p->oregs;
 	//if use SYS_mmap, the call will fail; 
 	//WHY? Because SYS_mmap only has one argument;
-	p->regs.eax = SYS_mmap2; 
-	p->regs.ebx = 0;
-	p->regs.ecx = 4;
-	p->regs.edx = prot;
-	p->regs.esi = flags;
-	p->regs.edi = -1;
-	p->regs.ebp = 0;
-	p->regs.eip = EBASE;
+	p->regs.AX = SYS_mmap2; 
+	p->regs.BX = 0;
+	p->regs.CX = 4;
+	p->regs.DX = prot;
+	p->regs.SI = flags;
+	p->regs.DI = -1;
+	p->regs.BP = 0;
+	p->regs.IP = EBASE;
 	char savebuf[4] = {0};
 	int n = proc_read(p, (void*)EBASE, savebuf, 4);
 	if (n != 4) {
@@ -217,11 +245,11 @@ void *proc_mmap(struct proc *p, int prot, int flags) {
 			goto cont;
 		}
 		proc_regs(p, 0);
-		if (p->regs.orig_eax == SYS_mmap2) {
+		if (p->regs.O_AX == SYS_mmap2) {
 			if (p->insys == 0) {
 				p->insys = 1;
 			} else if (p->insys == 1) {
-				addr = (void *)p->regs.eax;
+				addr = (void *)p->regs.AX;
 				p->insys = 0;
 				break;
 			}
@@ -241,11 +269,11 @@ int proc_mprotect(struct proc *p, void *addr, int prot) {
 	p->regs = p->oregs;
 	//if use SYS_mmap, the call will fail; 
 	//WHY? Because SYS_mmap only has one argument;
-	p->regs.eax = SYS_mprotect; 
-	p->regs.ebx = (unsigned long)addr;
-	p->regs.ecx = 0x1000;
-	p->regs.edx = prot;
-	p->regs.eip = EBASE;
+	p->regs.AX = SYS_mprotect; 
+	p->regs.BX = (unsigned long)addr;
+	p->regs.CX = 0x1000;
+	p->regs.DX = prot;
+	p->regs.IP = EBASE;
 	char savebuf[4] = {0};
 	int n = proc_read(p, (void*)EBASE, savebuf, 4);
 	if (n != 4) {
@@ -265,11 +293,11 @@ int proc_mprotect(struct proc *p, void *addr, int prot) {
 			goto cont;
 		}
 		proc_regs(p, 0);
-		if (p->regs.orig_eax == SYS_mprotect) {
+		if (p->regs.O_AX == SYS_mprotect) {
 			if (p->insys == 0) {
 				p->insys = 1;
 			} else if (p->insys == 1) {
-				ret = p->regs.eax;
+				ret = p->regs.AX;
 				p->insys = 0;
 				break;
 			}
@@ -286,9 +314,9 @@ void proc_exit(struct proc *p, int no) {
 	char *code = "\xcd\x80\x00\x00";
 	proc_save(p);
 	p->regs = p->oregs;
-	p->regs.eax = SYS_exit;
-	p->regs.ebx = no;
-	p->regs.eip = EBASE;
+	p->regs.AX = SYS_exit;
+	p->regs.BX = no;
+	p->regs.IP = EBASE;
 	char savebuf[4] = {0};
 	int n = proc_read(p, (void*)EBASE, savebuf, 4);
 	if (n != 4) {
@@ -314,7 +342,7 @@ void proc_exit(struct proc *p, int no) {
 			goto cont;
 		}
 		proc_regs(p, 0);
-		if (p->regs.orig_eax == SYS_exit) {
+		if (p->regs.O_AX == SYS_exit) {
 			if (p->insys == 0) {
 				p->insys = 1;
 			} else if (p->insys == 1) {
