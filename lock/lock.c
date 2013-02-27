@@ -5,27 +5,13 @@
 #include <errno.h>
 #include <sys/stat.h>
 #include <fcntl.h>
+#include <unistd.h>
 #include <sys/syscall.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <sys/ptrace.h>
 #include <sys/user.h>
 #include <sys/mman.h>
-
-#ifdef X86_64
-
-#define AX rax
-#define O_AX orig_rax
-#define BX rbx
-#define CX rcx
-#define DX rdx
-#define SI rsi
-#define DI rdi
-#define BP rbp
-#define SP rsp
-#define IP rip
-
-#else
 
 #define AX eax
 #define O_AX orig_eax
@@ -38,7 +24,8 @@
 #define SP esp
 #define IP eip
 
-#endif
+// linux syscall x86 ABI:
+// Trap # in AX, args in BX CX DX SI DI BP
 
 //4 ptrace-stops: syscall-stop, signal-delivery-stop, group-stop, ptrace_event-stop;
 //group-stop: caused by receiving a stopping signal, that is , SIGSTOP, SIGTSTP, SIGTTIN, SIGTTOU; 
