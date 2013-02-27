@@ -5,27 +5,17 @@
 #include <errno.h>
 #include <sys/stat.h>
 #include <fcntl.h>
-#include <unistd.h>
-#include <sys/syscall.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <sys/ptrace.h>
 #include <sys/user.h>
 #include <sys/mman.h>
+#include <unistd.h>
+#include <sys/syscall.h>
 
-#define AX eax
-#define O_AX orig_eax
-#define BX ebx
-#define CX ecx
-#define DX edx
-#define SI esi
-#define DI edi
-#define BP ebp
-#define SP esp
-#define IP eip
-
-// linux syscall x86 ABI:
-// Trap # in AX, args in BX CX DX SI DI BP
+// linux syscall x86_64:
+// Trap # in AX, args in DI SI DX R10 R8 R9
+// instruction: syscall
 
 //4 ptrace-stops: syscall-stop, signal-delivery-stop, group-stop, ptrace_event-stop;
 //group-stop: caused by receiving a stopping signal, that is , SIGSTOP, SIGTSTP, SIGTTIN, SIGTTOU; 
@@ -122,7 +112,7 @@ void proc_detach(struct proc *p) {
 void proc_wait(struct proc *p) {
 	int status = 0;
 	int child = waitpid(p->pid, &status, __WALL);
-	printf("wait child %d status %p\n", child, status);
+	printf("wait child %d status %p, %d\n", child, status, WIFSTOPPED(status));
 	if (child == -1) {
 		perror("wait");
 		exit(1);
@@ -158,10 +148,10 @@ int proc_write(struct proc *p, void *addr, char *buf, int len) {
 		void *word;
 		int l = len < sizeof(word) ? len : sizeof(word);
 		memcpy(&word, buf+i, l);
-		if (ptrace(PTRACE_POKEDATA, pid, addr+i, word) == -1) {
+		if (ptrace(PTRACE_POKETEXT, pid, addr+i, word) == -1) {
 			if (i)
 				break;
-			perror("ptrace");
+			perror("ptrace[POKEDATA]");
 			exit(1);
 		}
 		len -= sizeof(word);
@@ -176,10 +166,11 @@ int proc_read(struct proc *p, void *addr, char *buf, int len) {
 	while (len > 0) {
 		errno = 0;
 		long word = ptrace(PTRACE_PEEKDATA, pid, addr+i, NULL);
+		printf("word %ld\n", word);
 		if (errno != 0) {
 			if (i)
 				break;
-			perror("ptrace");
+			perror("ptrace[PTRACE_PEEKDATA]");
 			exit(1);
 		}
 		int l = len < sizeof(long) ? len : sizeof(long);
@@ -190,36 +181,29 @@ int proc_read(struct proc *p, void *addr, char *buf, int len) {
 	return i;
 }
 
-void proc_push(struct proc *p, long data) {
-	p->regs.SP -= 4;	
-	proc_write(p, (void *)p->regs.SP, (char *)&data, sizeof(long));
-}
-
-//BX, CX, DX, SI, DI, BP
-#define EBASE 0x8048000
+//DI SI DX R10 R8 R9
+#define EBASE 0x400000
 void *proc_mmap(struct proc *p, int prot, int flags) {
 	void *addr = NULL;
-	char *code = "\xcd\x80\x00\x00";
+	char *code = "\xcd\x80\x00\x00\x00\x00\x00\x00";
 	proc_save(p);
 	p->regs = p->oregs;
-	//if use SYS_mmap, the call will fail; 
-	//WHY? Because SYS_mmap only has one argument;
-	p->regs.AX = SYS_mmap2; 
-	p->regs.BX = 0;
-	p->regs.CX = 4;
-	p->regs.DX = prot;
-	p->regs.SI = flags;
-	p->regs.DI = -1;
-	p->regs.BP = 0;
-	p->regs.IP = EBASE;
-	char savebuf[4] = {0};
-	int n = proc_read(p, (void*)EBASE, savebuf, 4);
-	if (n != 4) {
+	p->regs.rax = SYS_mmap; 
+	p->regs.rdi = 0;
+	p->regs.rsi = 4;
+	p->regs.rdx = prot;
+	p->regs.r10 = flags;
+	p->regs.r8 = -1;
+	p->regs.r9 = 0;
+	p->regs.rip = EBASE;
+	char savebuf[8] = {0};
+	int n = proc_read(p, (void*)EBASE, savebuf, 8);
+	if (n != 8) {
 		perror("read");
 		exit(1);
 	}
-	n = proc_write(p, (void*)EBASE, code, 4);
-	if (n != 4) {
+	n = proc_write(p, (void*)EBASE, code, 8);
+	if (n != 8) {
 		perror("write");
 		exit(1);
 	}
@@ -232,11 +216,11 @@ void *proc_mmap(struct proc *p, int prot, int flags) {
 			goto cont;
 		}
 		proc_regs(p, 0);
-		if (p->regs.O_AX == SYS_mmap2) {
+		if (p->regs.orig_rax == SYS_mmap) {
 			if (p->insys == 0) {
 				p->insys = 1;
 			} else if (p->insys == 1) {
-				addr = (void *)p->regs.AX;
+				addr = (void *)p->regs.rax;
 				p->insys = 0;
 				break;
 			}
@@ -251,24 +235,23 @@ cont:
 
 int proc_mprotect(struct proc *p, void *addr, int prot) {
 	int ret = 0;
-	char *code = "\xcd\x80\x00\x00";
+	unsigned long err = 0;
+	char *code = "\x0f\x05\x00\x00\x00\x00\x00\x00";
 	proc_save(p);
 	p->regs = p->oregs;
-	//if use SYS_mmap, the call will fail; 
-	//WHY? Because SYS_mmap only has one argument;
-	p->regs.AX = SYS_mprotect; 
-	p->regs.BX = (unsigned long)addr;
-	p->regs.CX = 0x1000;
-	p->regs.DX = prot;
-	p->regs.IP = EBASE;
-	char savebuf[4] = {0};
-	int n = proc_read(p, (void*)EBASE, savebuf, 4);
-	if (n != 4) {
+	p->regs.rax = SYS_mprotect; 
+	p->regs.rdi = (unsigned long)addr;
+	p->regs.rsi = 0x1000;
+	p->regs.rdx = prot;
+	p->regs.rip = EBASE;
+	char savebuf[8] = {0};
+	int n = proc_read(p, (void*)EBASE, savebuf, 8);
+	if (n != 8) {
 		perror("read");
 		exit(1);
 	}
-	n = proc_write(p, (void*)EBASE, code, 4);
-	if (n != 4) {
+	n = proc_write(p, (void*)EBASE, code, 8);
+	if (n != 8) {
 		perror("write");
 		exit(1);
 	}
@@ -277,14 +260,15 @@ int proc_mprotect(struct proc *p, void *addr, int prot) {
 	while (1) {
 		proc_wait(p);
 		if (p->stat != SYSCALL_STOP) {
+			printf("not syscall\n");
 			goto cont;
 		}
 		proc_regs(p, 0);
-		if (p->regs.O_AX == SYS_mprotect) {
+		if (p->regs.orig_rax == SYS_mprotect) {
 			if (p->insys == 0) {
 				p->insys = 1;
 			} else if (p->insys == 1) {
-				ret = p->regs.AX;
+				err = p->regs.rax;
 				p->insys = 0;
 				break;
 			}
@@ -292,25 +276,26 @@ int proc_mprotect(struct proc *p, void *addr, int prot) {
 cont:
 		ptrace(PTRACE_SYSCALL, p->pid, NULL, NULL);
 	}
-	proc_write(p, (void *)EBASE, savebuf, 4);
+	proc_write(p, (void *)EBASE, savebuf, 8);
 	proc_restore(p);
+	printf("%d, %s\n", err, strerror(-err));
 	return ret;
 }
 
 void proc_exit(struct proc *p, int no) {
-	char *code = "\xcd\x80\x00\x00";
+	char *code = "\xcd\x80\x00\x00\x00\x00\x00\x00";
 	proc_save(p);
 	p->regs = p->oregs;
-	p->regs.AX = SYS_exit;
-	p->regs.BX = no;
-	p->regs.IP = EBASE;
-	char savebuf[4] = {0};
-	int n = proc_read(p, (void*)EBASE, savebuf, 4);
-	if (n != 4) {
+	p->regs.rax = SYS_exit;
+	p->regs.rdi = no;
+	p->regs.rip = EBASE;
+	char savebuf[8] = {0};
+	int n = proc_read(p, (void*)EBASE, savebuf, 8);
+	if (n != 8) {
 		perror("read");
 		exit(1);
 	}
-	proc_write(p, (void*)EBASE, code, 4);
+	proc_write(p, (void*)EBASE, code, 8);
 	proc_regs(p, 1);
 	printf("syscall exit begin...\n");
 	ptrace(PTRACE_SYSCALL, p->pid, NULL, NULL);
@@ -329,7 +314,7 @@ void proc_exit(struct proc *p, int no) {
 			goto cont;
 		}
 		proc_regs(p, 0);
-		if (p->regs.O_AX == SYS_exit) {
+		if (p->regs.orig_rax == SYS_exit) {
 			if (p->insys == 0) {
 				p->insys = 1;
 			} else if (p->insys == 1) {
@@ -344,6 +329,13 @@ cont:
 
 int locked = 42;
 
+void ProcWriteInt(struct proc *p, void *addr, int n) {
+	char buf[8] = {0};
+	proc_read(p, addr, buf, 8);
+	memmove(buf, &n, 4);
+	proc_write(p, addr, buf, 8);
+}
+
 int main(int argc, char *argv[]) {
 	if (argc != 3) {
 		return 1;
@@ -353,6 +345,8 @@ int main(int argc, char *argv[]) {
 	struct proc *p = attach(pid);
 	printf("attach %d\n", p->pid);
 	proc_mprotect(p, (void *)(addr & -0x1000), PROT_READ);
+	printf("begin...\n");
+	assert(p->stat<UNTRACED && p->stat>RUNNING);
 	proc_cont(p, 0);
 	while (1) {
 		proc_wait(p);
@@ -385,3 +379,5 @@ int main(int argc, char *argv[]) {
 	proc_detach(p);
 }
 
+void handle_sig() {
+}
